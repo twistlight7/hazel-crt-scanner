@@ -1,0 +1,22 @@
+# Secrets and credentials
+.env
+secrets.env
+*.key
+*.secret
+
+# Database files (large, binary)
+*.db
+*.db-journal
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
