@@ -428,10 +428,12 @@ def detect_crt(candles: list, timeframe: str, pair: str) -> dict | None:
     
     # Bullish CRT
     if c2["low"] < l and c2["close"] > l:
-        # Check delivery (Blue's rule: skip if >50% delivered)
+        # Check delivery (BACKTEST OPTIMIZATION 2026-04-04: require 20-50%)
+        # Winners avg 24-27% delivery, losers avg 17-20%
+        # Weak reclaim = fake sweep, over-extended = poor R:R
         delivery = check_delivery_bullish(c1, c2)
-        if delivery > 0.50:
-            log.info(f"  ⏭ {pair} {timeframe} — >50% delivered ({delivery*100:.1f}%)")
+        if delivery < 0.20 or delivery > 0.50:
+            log.info(f"  ⏭ {pair} {timeframe} — Delivery {delivery*100:.1f}% outside 20-50% range")
             return None
         
         # Validate against liquidity/POI for confluence scoring
@@ -469,10 +471,12 @@ def detect_crt(candles: list, timeframe: str, pair: str) -> dict | None:
     
     # Bearish CRT
     if c2["high"] > h and c2["close"] < h:
-        # Check delivery
+        # Check delivery (BACKTEST OPTIMIZATION 2026-04-04: require 20-50%)
+        # Winners avg 24-27% delivery, losers avg 17-20%
+        # Weak reclaim = fake sweep, over-extended = poor R:R
         delivery = check_delivery_bearish(c1, c2)
-        if delivery > 0.50:
-            log.info(f"  ⏭ {pair} {timeframe} — >50% delivered ({delivery*100:.1f}%)")
+        if delivery < 0.20 or delivery > 0.50:
+            log.info(f"  ⏭ {pair} {timeframe} — Delivery {delivery*100:.1f}% outside 20-50% range")
             return None
         
         # Validate against liquidity/POI for confluence scoring
@@ -529,6 +533,60 @@ def check_delivery_bearish(c1: dict, c2: dict) -> float:
     if rng == 0:
         return 1.0
     return (h - c2["close"]) / rng
+
+
+def check_follow_through(candles: list, signal_type: str, entry: float) -> bool:
+    """
+    Check if the next candle after signal shows immediate momentum.
+    
+    BACKTEST OPTIMIZATION (2026-04-04):
+    78% of losses reverse within 1-2 candles. This filters them.
+    
+    Args:
+        candles: Full candle list (includes signal candles + next)
+        signal_type: "BULLISH" or "BEARISH"
+        entry: Signal entry price (C2 close)
+    
+    Returns:
+        True if follow-through confirmed, False otherwise
+    """
+    if len(candles) < 3:
+        return True  # Not enough data, assume valid
+    
+    next_candle = candles[-1]  # Candle after C2
+    
+    if signal_type == "BULLISH":
+        # For bullish: next candle close should be > entry
+        if next_candle["close"] > entry:
+            return True
+        else:
+            return False
+    else:  # BEARISH
+        # For bearish: next candle close should be < entry
+        if next_candle["close"] < entry:
+            return True
+        else:
+            return False
+
+
+# ─────────────────────────────────────────────
+# PAIR/TF ENABLED CONFIG (BACKTEST OPTIMIZATION)
+# ─────────────────────────────────────────────
+
+ENABLED_PAIRS_TF = {
+    # ENABLED (positive expectancy)
+    "XAUUSD": ["H4"],  # Best: +0.09 RR, 33.8% WR
+    "GBPJPY": ["H1"],  # Most data: +0.06 RR, 35.3% WR, 1,010 trades
+    "GBPUSD": ["H1"],  # Breakeven+: +0.02 RR, 33.9% WR
+    # DISABLED (negative expectancy)
+    # BTCUSDT H1/H4, GBPJPY H4, USDJPY H1/H4, EURUSD H4
+}
+
+
+def is_pair_tf_enabled(pair: str, timeframe: str) -> bool:
+    """Check if pair/TF combination is enabled based on backtest expectancy."""
+    enabled_tfs = ENABLED_PAIRS_TF.get(pair, [])
+    return timeframe in enabled_tfs
 
 
 def get_multi_tf_bias(pair_signals: dict) -> str:
@@ -775,17 +833,37 @@ def poll_forex_prices():
 
 
 def scan_pair(pair: str, yf_ticker: str = None, ccxt_symbol: str = None):
-    """Run CRT scan across H1, H4, D1 for one pair."""
+    """
+    Run CRT scan across H1, H4, D1 for one pair.
+    
+    BACKTEST OPTIMIZATION (2026-04-04):
+    - Skip disabled pair/TF combinations (negative expectancy)
+    - Add follow-through check (78% of losses reverse within 1-2 candles)
+    """
     log.info("Scanning %s ...", pair)
     pair_signals = {}
 
     for tf in ["D1", "H4", "H1"]:
+        # BACKTEST OPTIMIZATION: Skip disabled pair/TF
+        if not is_pair_tf_enabled(pair, tf):
+            log.info(f"  ⏭ {pair} {tf} — Disabled (negative expectancy in backtest)")
+            continue
+        
         candles = get_candles_for_pair(pair, yf_ticker, ccxt_symbol, tf)
-        if len(candles) < 2:  # FIX (2026-04-04 06:00 UTC): detect_crt needs only 2 candles
+        if len(candles) < 2:
             log.warning("%s %s: not enough candles", pair, tf)
             continue
+        
         # Pass pair to detect_crt()
         signal = detect_crt(candles, tf, pair)
+        
+        # BACKTEST OPTIMIZATION: Follow-through check
+        if signal and len(candles) >= 3:
+            follow_through_ok = check_follow_through(candles, signal["type"], signal["entry"])
+            if not follow_through_ok:
+                log.info(f"  ⏭ {pair} {tf} — No follow-through (next candle reversed)")
+                signal = None  # Invalidate signal
+        
         pair_signals[tf] = signal
         if signal:
             confluence_note = f" ({signal.get('total_confluences', 0)} confluences, {signal.get('quality_tier', 'B')} tier)"
