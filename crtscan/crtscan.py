@@ -36,6 +36,21 @@ from tier_tracker import log_tier, get_summary
 load_dotenv()
 
 # ─────────────────────────────────────────────
+# SESSION FILTERS (Hermes Guide 2026-04-04)
+# ─────────────────────────────────────────────
+
+# H1: Only accept candles closing 07:00-17:00 UTC (London through NY)
+H1_SESSION_START = 7
+H1_SESSION_END = 17
+
+# H4: Only accept these specific candle close hours
+H4_VALID_HOURS = [8, 12, 16]  # London open, Overlap, Mid-NY
+
+# D1: Sweep must occur during high-probability window
+D1_SWEEP_START = 8   # London open
+D1_SWEEP_END = 16    # End of NY overlap
+
+# ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
 
@@ -64,9 +79,14 @@ DB_PATH = os.path.expanduser("~/.crtscan/learning.db")
 MIN_CONFIDENCE = 0.45   # Only alert if win rate >= 45% (starts at 0.5 neutral)
 MIN_SIGNALS_FOR_FILTER = 5  # Need at least 5 past signals before filtering by confidence
 
+log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scanner.log")
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file, encoding="utf-8"),
+    ]
 )
 log = logging.getLogger("CRTSCAN")
 
@@ -226,6 +246,8 @@ def update_outcomes(current_prices: dict):
             continue
 
         detected = datetime.fromisoformat(detected_at)
+        if detected.tzinfo is None:
+            detected = detected.replace(tzinfo=timezone.utc)
         age_hours = (datetime.now(timezone.utc) - detected).total_seconds() / 3600
 
         outcome = None
@@ -832,6 +854,46 @@ def poll_forex_prices():
             log.debug("Forex price poll error for %s: %s", pair, e)
 
 
+def is_valid_session(candles: list, timeframe: str) -> bool:
+    """
+    Check if candle closes during valid session window.
+    
+    SESSION FILTERS (Hermes Guide 2026-04-04):
+    - H1: 07:00-17:00 UTC (London through NY)
+    - H4: 08:00, 12:00, 16:00 UTC only (London open, Overlap, Mid-NY)
+    - D1: Accepts all (sweep-time validation needs C2 analysis)
+    
+    Args:
+        candles: Candle list (candles[-1] is most recent closed)
+        timeframe: "H1", "H4", or "D1"
+    
+    Returns:
+        True if session is valid, False otherwise
+    """
+    if len(candles) < 1:
+        return False
+    
+    # Get most recent closed candle
+    c2 = candles[-1]
+    candle_hour = datetime.fromtimestamp(
+        c2["timestamp"] / 1000, tz=timezone.utc
+    ).hour
+    
+    if timeframe == "H1":
+        # H1: Filter to 07:00-17:00 UTC
+        return H1_SESSION_START <= candle_hour < H1_SESSION_END
+    
+    elif timeframe == "H4":
+        # H4: Only 08:00, 12:00, 16:00 UTC closes
+        return candle_hour in H4_VALID_HOURS
+    
+    elif timeframe == "D1":
+        # D1: Accept all (for now)
+        return True
+    
+    return False
+
+
 def scan_pair(pair: str, yf_ticker: str = None, ccxt_symbol: str = None):
     """
     Run CRT scan across H1, H4, D1 for one pair.
@@ -839,6 +901,7 @@ def scan_pair(pair: str, yf_ticker: str = None, ccxt_symbol: str = None):
     BACKTEST OPTIMIZATION (2026-04-04):
     - Skip disabled pair/TF combinations (negative expectancy)
     - Add follow-through check (78% of losses reverse within 1-2 candles)
+    - Add session filtering (London/NY only)
     """
     log.info("Scanning %s ...", pair)
     pair_signals = {}
@@ -852,6 +915,14 @@ def scan_pair(pair: str, yf_ticker: str = None, ccxt_symbol: str = None):
         candles = get_candles_for_pair(pair, yf_ticker, ccxt_symbol, tf)
         if len(candles) < 2:
             log.warning("%s %s: not enough candles", pair, tf)
+            continue
+        
+        # SESSION FILTER (Hermes Guide 2026-04-04)
+        if not is_valid_session(candles, tf):
+            candle_hour = datetime.fromtimestamp(
+                candles[-1]["timestamp"] / 1000, tz=timezone.utc
+            ).hour
+            log.info(f"  ⏭ {pair} {tf} — Outside valid session (hour={candle_hour})")
             continue
         
         # Pass pair to detect_crt()
@@ -932,10 +1003,10 @@ def run_full_scan():
     # Update outcomes of past signals first
     update_outcomes(current_prices)
 
-    # Scan forex
+    # Scan forex (with rate limiting)
     for pair, yf_ticker in FOREX_PAIRS.items():
         scan_pair(pair, yf_ticker=yf_ticker)
-        time.sleep(1)  # rate limit yfinance
+        time.sleep(1.5)  # rate limit yfinance (increased from 1s to 1.5s)
 
     # Scan crypto
     for pair, ccxt_symbol in CRYPTO_PAIRS.items():
