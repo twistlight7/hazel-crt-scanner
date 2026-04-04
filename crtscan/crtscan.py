@@ -160,7 +160,7 @@ def log_signal(pair, tf, signal):
         signal["sl"],
         signal["range_high"],
         signal["range_low"],
-        datetime.utcnow().isoformat(),
+        datetime.now(timezone.utc).isoformat(),
         session,
         pillar_score,
         structure,
@@ -226,7 +226,7 @@ def update_outcomes(current_prices: dict):
             continue
 
         detected = datetime.fromisoformat(detected_at)
-        age_hours = (datetime.utcnow() - detected).total_seconds() / 3600
+        age_hours = (datetime.now(timezone.utc) - detected).total_seconds() / 3600
 
         outcome = None
         if stype == "BULLISH":
@@ -259,7 +259,7 @@ def update_outcomes(current_prices: dict):
                 UPDATE signals
                 SET outcome=?, closed_at=?, rr_ratio=?
                 WHERE id=?
-            """, (outcome, datetime.utcnow().isoformat(), rr, sid))
+            """, (outcome, datetime.now(timezone.utc).isoformat(), rr, sid))
             log.info("Signal #%d %s %s → %s (RR: %s)", sid, pair, stype, outcome, rr)
 
     conn.commit()
